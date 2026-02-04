@@ -255,6 +255,7 @@ class GraphExecutor:
         total_latency = 0
         node_retry_counts: dict[str, int] = {}  # Track retries per node
         node_visit_counts: dict[str, int] = {}  # Track visits for feedback loops
+        _is_retry = False  # True when looping back for a retry (not a new visit)
 
         # Determine entry point (may differ if resuming)
         current_node_id = graph.get_entry_point(session_state)
@@ -284,7 +285,11 @@ class GraphExecutor:
                     raise RuntimeError(f"Node not found: {current_node_id}")
 
                 # Enforce max_node_visits (feedback/callback edge support)
-                node_visit_counts[current_node_id] = node_visit_counts.get(current_node_id, 0) + 1
+                # Don't increment visit count on retries — retries are not new visits
+                if not _is_retry:
+                    cnt = node_visit_counts.get(current_node_id, 0) + 1
+                    node_visit_counts[current_node_id] = cnt
+                _is_retry = False
                 max_visits = getattr(node_spec, "max_node_visits", 1)
                 if max_visits > 0 and node_visit_counts[current_node_id] > max_visits:
                     self.logger.warning(
@@ -433,6 +438,7 @@ class GraphExecutor:
                         self.logger.info(
                             f"   ↻ Retrying ({node_retry_counts[current_node_id]}/{max_retries})..."
                         )
+                        _is_retry = True
                         continue
                     else:
                         # Max retries exceeded - fail the execution
@@ -524,11 +530,39 @@ class GraphExecutor:
                     break
 
                 # Determine next node
+                _navigated = False
                 if result.next_node:
-                    # Router explicitly set next node
-                    self.logger.info(f"   → Router directing to: {result.next_node}")
-                    current_node_id = result.next_node
-                else:
+                    # Dynamic routing: router or navigate_to
+                    _nav_valid = True
+
+                    if node_spec.node_type != "router":
+                        # Validate navigation target for non-router nodes
+                        allowed = getattr(node_spec, "allowed_navigation_targets", [])
+                        target_spec = graph.get_node(result.next_node)
+
+                        if target_spec is None:
+                            self.logger.warning(
+                                f"   ! Navigation target '{result.next_node}' "
+                                f"not found in graph"
+                            )
+                            _nav_valid = False
+                        elif allowed and result.next_node not in allowed:
+                            self.logger.warning(
+                                f"   ! Navigation to '{result.next_node}' blocked: "
+                                f"not in allowed_navigation_targets {allowed}"
+                            )
+                            _nav_valid = False
+
+                    if _nav_valid:
+                        reason = result.route_reason or ""
+                        self.logger.info(
+                            f"   → Navigating to: {result.next_node}"
+                            + (f" ({reason})" if reason else "")
+                        )
+                        current_node_id = result.next_node
+                        _navigated = True
+
+                if not _navigated:
                     # Get all traversable edges for fan-out detection
                     traversable_edges = self._get_all_traversable_edges(
                         graph=graph,

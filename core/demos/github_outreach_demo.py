@@ -519,7 +519,7 @@ NODE_SPECS = {
             "load_data",
             "save_data",
         ],
-        max_node_visits=3,
+        max_node_visits=5,
         system_prompt=(
             "You are a Contact Extractor agent. Your inputs 'user_profiles' and "
             "'relevance_scores' are filenames pointing to JSON data files.\n\n"
@@ -555,8 +555,9 @@ NODE_SPECS = {
         input_keys=["contact_list"],
         output_keys=["approved_contacts", "redo_extraction"],
         nullable_output_keys=["approved_contacts", "redo_extraction"],
-        max_node_visits=3,
+        max_node_visits=5,
         tools=["load_data", "save_data"],
+        allowed_navigation_targets=["extractor"],
         system_prompt=(
             "You are the Review agent at a human checkpoint. Your input 'contact_list' "
             "is a filename pointing to a JSON data file.\n\n"
@@ -570,6 +571,10 @@ NODE_SPECS = {
             "     set_output(key='approved_contacts', value='approved_contacts.json')\n\n"
             "   IF REDO REQUESTED: call:\n"
             "     set_output(key='redo_extraction', value='true')\n\n"
+            "NAVIGATION:\n"
+            "If the operator wants to go back and re-extract contacts with different "
+            "criteria, you can use navigate_to(target='extractor') instead of "
+            "set_output(key='redo_extraction').\n\n"
             "CRITICAL RULE: Call set_output EXACTLY ONCE with EXACTLY ONE key.\n"
             "NEVER call set_output twice. NEVER set both keys.\n"
             "The two output keys are mutually exclusive — setting both will cause an error."
@@ -631,8 +636,9 @@ NODE_SPECS = {
         input_keys=["draft_emails"],
         output_keys=["approved_emails", "revise_campaigns"],
         nullable_output_keys=["approved_emails", "revise_campaigns"],
-        max_node_visits=3,
+        max_node_visits=5,
         tools=["load_data", "save_data"],
+        allowed_navigation_targets=["review", "campaign_builder"],
         system_prompt=(
             "You are the Approval agent at the final human checkpoint. Your input "
             "'draft_emails' is a filename pointing to a JSON data file.\n\n"
@@ -645,6 +651,10 @@ NODE_SPECS = {
             "     set_output(key='approved_emails', value='approved_emails.json')\n\n"
             "   IF REVISION REQUESTED: call:\n"
             "     set_output(key='revise_campaigns', value='true')\n\n"
+            "NAVIGATION:\n"
+            "If the operator wants to go back to review the contact list, use "
+            "navigate_to(target='review'). If they want to revise the email drafts, "
+            "use navigate_to(target='campaign_builder').\n\n"
             "CRITICAL RULE: Call set_output EXACTLY ONCE with EXACTLY ONE key.\n"
             "NEVER call set_output twice. NEVER set both keys.\n"
             "The two output keys are mutually exclusive — setting both will cause an error."

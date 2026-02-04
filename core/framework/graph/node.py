@@ -237,6 +237,12 @@ class NodeSpec(BaseModel):
         description="If True, this node streams output to the end user and can request input.",
     )
 
+    # Dynamic navigation (hybrid execution pattern)
+    allowed_navigation_targets: list[str] = Field(
+        default_factory=list,
+        description="Node IDs this node can navigate to via navigate_to tool. Empty = disabled.",
+    )
+
     model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
 

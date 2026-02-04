@@ -180,6 +180,9 @@ class EventLoopNode(NodeProtocol):
         # Client-facing input blocking state
         self._input_ready = asyncio.Event()
         self._shutdown = False
+        # Dynamic navigation state (hybrid execution pattern)
+        self._navigate_target: str | None = None
+        self._navigate_reason: str | None = None
 
     def validate_input(self, ctx: NodeContext) -> list[str]:
         """Validate hard requirements only.
@@ -209,6 +212,10 @@ class EventLoopNode(NodeProtocol):
         if ctx.llm is None:
             return NodeResult(success=False, error="LLM provider not available")
 
+        # 1b. Reset navigation state
+        self._navigate_target = None
+        self._navigate_reason = None
+
         # 2. Restore or create new conversation + accumulator
         conversation, accumulator, start_iteration = await self._restore(ctx)
         if conversation is None:
@@ -226,11 +233,16 @@ class EventLoopNode(NodeProtocol):
             if initial_message:
                 await conversation.add_user_message(initial_message)
 
-        # 3. Build tool list: node tools + synthetic set_output tool
+        # 3. Build tool list: node tools + synthetic tools
         tools = list(ctx.available_tools)
         set_output_tool = self._build_set_output_tool(ctx.node_spec.output_keys)
         if set_output_tool:
             tools.append(set_output_tool)
+        navigate_to_tool = self._build_navigate_to_tool(
+            getattr(ctx.node_spec, "allowed_navigation_targets", []),
+        )
+        if navigate_to_tool:
+            tools.append(navigate_to_tool)
 
         logger.info(
             "[%s] Tools available (%d): %s | client_facing=%s | judge=%s",
@@ -320,6 +332,32 @@ class EventLoopNode(NodeProtocol):
 
             # 6g. Write cursor checkpoint
             await self._write_cursor(ctx, conversation, accumulator, iteration)
+
+            # 6g'. Check if navigate_to was called
+            if self._navigate_target:
+                target = self._navigate_target
+                reason = self._navigate_reason or ""
+                self._navigate_target = None
+                self._navigate_reason = None
+
+                logger.info(
+                    "[%s] iter=%d: navigate_to '%s' (reason: %s)",
+                    node_id,
+                    iteration,
+                    target,
+                    reason,
+                )
+
+                await self._publish_loop_completed(stream_id, node_id, iteration + 1)
+                latency_ms = int((time.time() - start_time) * 1000)
+                return NodeResult(
+                    success=True,
+                    output=accumulator.to_dict(),
+                    next_node=target,
+                    route_reason=f"User navigation: {reason}",
+                    tokens_used=total_input_tokens + total_output_tokens,
+                    latency_ms=latency_ms,
+                )
 
             # 6h. Client-facing input wait
             logger.info(
@@ -641,6 +679,19 @@ class EventLoopNode(NodeProtocol):
                     # Async write-through for set_output
                     if not result.is_error:
                         await accumulator.set(tc.tool_input["key"], tc.tool_input["value"])
+                elif tc.tool_name == "navigate_to":
+                    result = self._handle_navigate_to(
+                        tc.tool_input,
+                        getattr(ctx.node_spec, "allowed_navigation_targets", []),
+                    )
+                    result = ToolResult(
+                        tool_use_id=tc.tool_use_id,
+                        content=result.content,
+                        is_error=result.is_error,
+                    )
+                    if not result.is_error:
+                        self._navigate_target = tc.tool_input["target"]
+                        self._navigate_reason = tc.tool_input.get("reason", "")
                 else:
                     # Execute real tool
                     result = await self._execute_tool(tc)
@@ -803,6 +854,66 @@ class EventLoopNode(NodeProtocol):
         return ToolResult(
             tool_use_id="",
             content=f"Output '{key}' set successfully.",
+            is_error=False,
+        )
+
+    # -------------------------------------------------------------------
+    # Dynamic navigation (navigate_to synthetic tool)
+    # -------------------------------------------------------------------
+
+    def _build_navigate_to_tool(self, allowed_targets: list[str]) -> Tool | None:
+        """Build the synthetic navigate_to tool for dynamic graph navigation.
+
+        Only created when allowed_targets is non-empty.
+        """
+        if not allowed_targets:
+            return None
+        targets_str = ", ".join(f"'{t}'" for t in allowed_targets)
+        return Tool(
+            name="navigate_to",
+            description=(
+                "Navigate the pipeline to a different stage. Use this when the user "
+                "asks to go back to a previous step or move to a different stage. "
+                f"Allowed targets: {targets_str}. "
+                "IMPORTANT: Calling this exits the current stage immediately. "
+                "Any outputs you've set with set_output will be discarded."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": f"Node ID to navigate to. Must be one of: {allowed_targets}",
+                        "enum": allowed_targets,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason for navigation.",
+                    },
+                },
+                "required": ["target", "reason"],
+            },
+        )
+
+    def _handle_navigate_to(
+        self,
+        tool_input: dict[str, Any],
+        allowed_targets: list[str],
+    ) -> ToolResult:
+        """Handle navigate_to tool call. Returns ToolResult (sync)."""
+        target = tool_input.get("target", "")
+        reason = tool_input.get("reason", "")
+
+        if target not in allowed_targets:
+            return ToolResult(
+                tool_use_id="",
+                content=f"Invalid navigation target '{target}'. Allowed: {allowed_targets}",
+                is_error=True,
+            )
+
+        return ToolResult(
+            tool_use_id="",
+            content=f"Navigating to '{target}'. Reason: {reason}",
             is_error=False,
         )
 
